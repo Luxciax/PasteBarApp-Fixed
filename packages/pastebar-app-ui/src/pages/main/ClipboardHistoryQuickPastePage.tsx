@@ -155,7 +155,7 @@ export default function ClipboardHistoryQuickPastePage() {
 
   // Hooks for copy and paste operations
   const [copiedHistoryItem, handleCopyHistoryItem] = useCopyPasteHistoryItem({
-    delay: 100,
+    delay: 0,
     onCopied: () => {
       if (isQuickPasteAutoClose) {
         appWindow?.close()
@@ -165,7 +165,7 @@ export default function ClipboardHistoryQuickPastePage() {
 
   const [pastedHistoryItem, pastingCountDown, handlePasteHistoryItem] =
     usePasteHistoryItem({
-      delay: 100,
+      delay: 0,
       onPasted: () => {
         if (isQuickPasteAutoClose) {
           appWindow?.close()
