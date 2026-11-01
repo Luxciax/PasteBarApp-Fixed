@@ -34,10 +34,17 @@ export const useCopyPasteHistoryItem = ({
     invoke('copy_history_item', { historyId })
       .then(res => {
         if (res === 'ok') {
-          requestAnimationFrame(() => {
-            copiedItem.value = ''
-            onCopied()
-          })
+          const finishCopy = () => {
+            requestAnimationFrame(() => {
+              copiedItem.value = ''
+              onCopied()
+            })
+          }
+          if (delay > 0) {
+            setTimeout(finishCopy, delay)
+          } else {
+            finishCopy()
+          }
         } else {
           copiedItem.value = ''
           console.error('Failed to copy history item', res)
@@ -52,11 +59,7 @@ export const useCopyPasteHistoryItem = ({
   const handleCopy = (historyId: UniqueIdentifier) => {
     if (historyId && !copiedItem.value) {
       copiedItem.value = historyId
-      if (delay > 0) {
-        setTimeout(() => copyHistoryItem(historyId), delay)
-      } else {
-        copyHistoryItem(historyId)
-      }
+      copyHistoryItem(historyId)
     }
   }
 

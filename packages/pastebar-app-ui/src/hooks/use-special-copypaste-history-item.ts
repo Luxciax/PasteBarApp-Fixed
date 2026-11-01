@@ -40,24 +40,23 @@ export const useSpecialCopyPasteHistoryItem = ({
       // Apply the text transformation - this will throw if it fails
       const transformedText = await applyTransform(value, transformId)
 
-      // Only copy if transformation was successful
-      setTimeout(() => {
-        invoke('copy_text', { text: transformedText })
-          .then(res => {
-            if (res === 'ok') {
-              requestAnimationFrame(() => {
-                specialCopiedItem.value = ''
-              })
-            } else {
-              specialCopiedItem.value = ''
-              console.error('Failed to copy transformed text', res)
-            }
-          })
-          .catch(err => {
+      // Write immediately; delay is only for the copied-state UI feedback.
+      const res = await invoke('copy_text', { text: transformedText })
+      if (res === 'ok') {
+        const finishCopy = () => {
+          requestAnimationFrame(() => {
             specialCopiedItem.value = ''
-            console.error('Failed to copy transformed text', err)
           })
-      }, delay)
+        }
+        if (delay > 0) {
+          setTimeout(finishCopy, delay)
+        } else {
+          finishCopy()
+        }
+      } else {
+        specialCopiedItem.value = ''
+        console.error('Failed to copy transformed text', res)
+      }
     } catch (error) {
       // Clear UI feedback immediately on transformation error
       specialCopiedItem.value = ''

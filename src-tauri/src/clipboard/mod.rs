@@ -1,4 +1,4 @@
-use arboard::{Clipboard, ImageData};
+use arboard::{Clipboard, Error as ClipboardError, ImageData};
 use base64::{engine::general_purpose, Engine as _};
 use clipboard_master::{CallbackResult, ClipboardHandler, Master};
 use image::GenericImageView;
@@ -8,7 +8,10 @@ use std::fs::File;
 use std::io::Read;
 use std::{
   collections::HashMap,
+  panic::{catch_unwind, AssertUnwindSafe},
   sync::{Arc, Mutex},
+  thread,
+  time::Duration,
 };
 use tauri::{self};
 use tauri::{
@@ -68,9 +71,19 @@ where
   R: Runtime,
 {
   fn on_clipboard_change(&mut self) -> CallbackResult {
-    let clipboard_manager = self.clipboard_manager.lock().unwrap();
+    // Clipboard managers and translation tools often perform several writes in a very
+    // short transaction. Give the writer a brief chance to finish before reading.
+    #[cfg(target_os = "windows")]
+    thread::sleep(Duration::from_millis(25));
+
     let app_settings = self.app_handle.state::<Mutex<HashMap<String, Setting>>>();
-    let settings_map = app_settings.lock().unwrap();
+    let settings_map = match app_settings.lock() {
+      Ok(settings) => settings.clone(),
+      Err(poisoned) => {
+        eprintln!("Clipboard settings lock was poisoned; recovering");
+        poisoned.into_inner().clone()
+      }
+    };
 
     if let Some(setting) = settings_map.get("isHistoryEnabled") {
       if let Some(value_bool) = setting.value_bool {
@@ -81,7 +94,16 @@ where
       }
     }
 
-    let clipboard_text = clipboard_manager.read_text();
+    let clipboard_text = {
+      let clipboard_manager = match self.clipboard_manager.lock() {
+        Ok(manager) => manager,
+        Err(poisoned) => {
+          eprintln!("Clipboard manager lock was poisoned; recovering");
+          poisoned.into_inner()
+        }
+      };
+      clipboard_manager.read_text()
+    };
 
     history_service::increment_history_insert_count();
 
@@ -249,7 +271,18 @@ where
       }
 
       // Only try to get image from clipboard if capture is enabled
-      if let Ok(image_binary) = clipboard_manager.get_image_binary() {
+      let clipboard_image = {
+        let clipboard_manager = match self.clipboard_manager.lock() {
+          Ok(manager) => manager,
+          Err(poisoned) => {
+            eprintln!("Clipboard manager lock was poisoned; recovering");
+            poisoned.into_inner()
+          }
+        };
+        clipboard_manager.get_image_binary()
+      };
+
+      if let Ok(image_binary) = clipboard_image {
         let mut is_app_excluded = false;
 
         if let Some(setting) = settings_map.get("isExclusionAppListEnabled") {
@@ -311,8 +344,21 @@ pub struct ClipboardManager {
 
 impl ClipboardManager {
   pub fn read_text(&self) -> Result<String, String> {
-    let mut clipboard = Clipboard::new().unwrap();
-    clipboard.get_text().map_err(|err| err.to_string())
+    const READ_RETRY_ATTEMPTS: usize = 4;
+    const READ_RETRY_DELAY_MS: u64 = 10;
+
+    for attempt in 0..READ_RETRY_ATTEMPTS {
+      let mut clipboard = Clipboard::new().map_err(|err| err.to_string())?;
+      match clipboard.get_text() {
+        Ok(text) => return Ok(text),
+        Err(ClipboardError::ClipboardOccupied) if attempt + 1 < READ_RETRY_ATTEMPTS => {
+          thread::sleep(Duration::from_millis(READ_RETRY_DELAY_MS));
+        }
+        Err(error) => return Err(error.to_string()),
+      }
+    }
+
+    Err("Clipboard remained occupied after retries".to_string())
   }
 
   pub fn write_text(&self, text: String) -> Result<(), String> {
@@ -517,14 +563,31 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
       let app_handle = app.app_handle();
 
       let running = Arc::new(Mutex::new(false));
-      tauri::async_runtime::spawn(async move {
-        let _ = Master::new(ClipboardMonitor::new(
-          app_handle,
-          running,
-          Arc::clone(&clipboard_manager),
-        ))
-        .run();
-      });
+      thread::Builder::new()
+        .name("clipboard-monitor-supervisor".to_string())
+        .spawn(move || loop {
+          let monitor = ClipboardMonitor::new(
+            app_handle.clone(),
+            Arc::clone(&running),
+            Arc::clone(&clipboard_manager),
+          );
+
+          let result = catch_unwind(AssertUnwindSafe(|| Master::new(monitor).run()));
+          match result {
+            Ok(Ok(())) => {
+              eprintln!("Clipboard monitor stopped unexpectedly; restarting");
+            }
+            Ok(Err(error)) => {
+              eprintln!("Clipboard monitor error: {}; restarting", error);
+            }
+            Err(_) => {
+              eprintln!("Clipboard monitor panicked; restarting");
+            }
+          }
+
+          thread::sleep(Duration::from_millis(250));
+        })
+        .expect("failed to start clipboard monitor supervisor");
       Ok(())
     })
     .build()
